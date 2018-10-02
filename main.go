@@ -8,7 +8,7 @@ import (
 
 	macaron "gopkg.in/macaron.v1"
 
-	smmmodels "pure/smm/boards/models"
+	smmmodels "gitlab.com/zhuha/smmpolice.ru/models"
 
 	"github.com/Unknwon/com"
 	"github.com/deepnesting/nestingbot/pkg/binlog"
@@ -196,17 +196,15 @@ func eventHandler(c *macaron.Context, event Message) {
 	}
 
 	if event.Category == 0 {
-		kb := tamework.NewKeyboard(nil).AddCallbackButton("О сдаче квартир", fmt.Sprintf("setcat_%d_1", event.ID)).
+		kb := tamework.NewKeyboard(nil).AddCallbackButton("#сдаю_гнездышко", fmt.Sprintf("setcat_%d_1", event.ID)).
 			AddCallbackButton("").
-			AddCallbackButton("О сдаче комнат", fmt.Sprintf("setcat_%d_2", event.ID)).
+			AddCallbackButton("#сосед_гнездышко", fmt.Sprintf("setcat_%d_3", event.ID)).
 			AddCallbackButton("").
-			AddCallbackButton("О поиске соседа", fmt.Sprintf("setcat_%d_3", event.ID)).
-			AddCallbackButton("").
-			AddCallbackButton("О поиске комнат", fmt.Sprintf("setcat_%d_4", event.ID)).
-			AddCallbackButton("").
-			AddCallbackButton("О поиск квартир", fmt.Sprintf("setcat_%d_5", event.ID))
+			// AddCallbackButton("О поиске комнат", fmt.Sprintf("setcat_%d_4", event.ID)).
+			// AddCallbackButton("").
+			AddCallbackButton("#сниму_гнездышко", fmt.Sprintf("setcat_%d_5", event.ID))
 		if event.HasPhoto {
-			uploadRemoteMessage(setting.App.Telegram.Admin, event.ID, event.Contact, kb)
+			_, err := uploadRemoteMessage(setting.App.Telegram.Admin, event.ID, event.Contact, kb)
 
 		} else {
 			msg := tgbotapi.NewMessage(setting.App.Telegram.Admin,

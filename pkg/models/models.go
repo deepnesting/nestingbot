@@ -16,13 +16,14 @@ var (
 )
 
 func NewContext() (err error) {
-	db, err = boltutils.Open("data/db.bolt", 0777, nil)
+	db, err = boltutils.New(boltutils.OpenPath("data/db.bolt"), boltutils.Compression(boltutils.GzipCompressor))
 	if err != nil {
 		return
 	}
-	db.EnableGzip = true
 	err = db.CreateBucket(usersBucket)
-
+	if err != nil {
+		return err
+	}
 	// sql
 
 	gormDB, err = gorm.Open("sqlite3", "data/db.sqlite")
