@@ -1,51 +1,337 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
-	"log"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
-	macaron "gopkg.in/macaron.v1"
+	"github.com/pkg/errors"
 
-	smmmodels "gitlab.com/zhuha/smmpolice.ru/models"
+	helpPkg "github.com/deepnesting/nestingbot/domain/help"
 
 	"github.com/Unknwon/com"
+	"github.com/asdine/storm"
+	"github.com/bloom42/rz-go/v2"
+	"github.com/bloom42/rz-go/v2/log"
+	offersPkg "github.com/deepnesting/nestingbot/domain/offers"
+	"github.com/deepnesting/nestingbot/domain/offers/delivery"
+	offersRepoPkg "github.com/deepnesting/nestingbot/domain/offers/repo"
+	"github.com/deepnesting/nestingbot/domain/user"
 	"github.com/deepnesting/nestingbot/pkg/binlog"
 	"github.com/deepnesting/nestingbot/pkg/buttons"
-	"github.com/deepnesting/nestingbot/pkg/models"
-	"github.com/deepnesting/nestingbot/pkg/setting"
 	"github.com/deepnesting/nestingbot/routers/subscriptions"
 	"github.com/fatih/color"
-	"github.com/go-macaron/binding"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api"
-	dry "github.com/ungerik/go-dry"
+	"github.com/zhuharev/talert"
 	"github.com/zhuharev/tamework"
+
+	whuClient "github.com/zhuharev/whu/domain/client"
 )
+
+const version = "0.0.1"
 
 var (
-	tw *tamework.Tamework
+	tw       *tamework.Tamework
+	adminIDs []int64
 )
 
+// func sendTestMessage() {
+// 	bot, _ := tamework.New("882530435:AAF9rkG95tg4f10YNSfOdDFogVYFzgLskwU")
+// 	err := bot.Send(132101139, "Добрый день! При создании объявления не сохранились ваши контакты, пришлите их пожалуйста администратору @Andrewsaltanov . Спасибо!")
+// 	if err != nil {
+// 		panic(err)
+// 	}
+// }
+
+func getUsername(ctx *tamework.Context) string {
+	username := ctx.Update().Username()
+	if strings.HasPrefix(username, "_") {
+		username = "без юзернейма"
+	}
+	return username
+}
+
+type YaCallback struct {
+	Amount           string    `json:"amount"`
+	Codepro          string    `json:"codepro"`
+	Currency         string    `json:"currency"`
+	Datetime         time.Time `json:"datetime"`
+	Label            string    `json:"label"`
+	NotificationType string    `json:"notification_type"`
+	OperationID      string    `json:"operation_id"`
+	OperationLabel   string    `json:"operation_label"`
+	Sender           string    `json:"sender"`
+	Sha1Hash         string    `json:"sha1_hash"`
+	TestNotification string    `json:"test_notification"`
+}
+
+func makeHandleYACB(bot *tamework.Tamework, offerRepo offersPkg.Repository, userRepo user.Repo) func(data []byte) error {
+	return func(data []byte) error {
+		log.Info("handle webhook")
+		var yaCB YaCallback
+		err := json.Unmarshal(data, &yaCB)
+		if err != nil {
+			return errors.Wrap(err, "unmarshal")
+		}
+		if !strings.HasPrefix(yaCB.Label, "u:") {
+			return nil
+		}
+		amount, err := strconv.ParseFloat(yaCB.Amount, 64)
+		if err != nil {
+			return errors.Wrap(err, "parse amount")
+		}
+		if amount < 37 {
+			return errors.Wrap(err, "small imcoming amount")
+		}
+
+		arr := strings.Split(yaCB.Label, ":")
+		if len(arr) != 2 {
+			return nil
+		}
+		id, err := strconv.ParseInt(arr[1], 10, 64)
+		if err != nil {
+			log.Error("parse label to int", rz.Err(err))
+			return nil // may be not bot payment
+		}
+
+		offer, err := offerRepo.GetByID(int(id))
+		if err != nil {
+			return err
+		}
+
+		offer.Paid = true
+
+		err = offerRepo.Update(offer)
+		if err != nil {
+			return err
+		}
+
+		user, err := userRepo.Get(offer.UserID)
+		if err != nil {
+			return err
+		}
+
+		// to user
+		bot.Send(int64(offer.UserID), "Оплата прошла успешно")
+
+		renderedOffer, _ := offersPkg.FormatMarkdown(*offer, user.Username)
+		for _, v := range adminIDs {
+
+			kb := tamework.NewKeyboard(nil).
+				AddCallbackButton("Меню", "showmenu:"+arr[1])
+
+			msg := tgbotapi.NewMessage(v, renderedOffer)
+			msg.ReplyMarkup = kb.Markup()
+
+			_, err := bot.Bot().Send(msg)
+			if err != nil {
+				log.Error("send msg to tg", rz.Err(err))
+			}
+
+			//bot.Send(v, fmt.Sprintf("Обявление #%d оплачено", offer.ID))
+		}
+
+		return nil
+	}
+}
+
 func main() {
-	err := setting.NewContext()
+	logger := rz.New(rz.Formatter(rz.FormatterLogfmt()), rz.Level(rz.DebugLevel))
+	log.SetLogger(logger)
+	//sendTestMessage()
+	db, err := storm.Open(os.Getenv("DB_PATH"))
 	if err != nil {
-		log.Fatalf("Failed setting initialization, %s", err)
+		log.Fatal("open db")
 	}
 
-	err = models.NewContext()
-	if err != nil {
-		log.Fatalf("Failed boltdb initialization, %s", err)
+	userRepo := user.NewRepository(db)
+	offerRepo := offersRepoPkg.New(db, userRepo)
+	helpRepo := helpPkg.NewRepo(db)
+
+	accessToken := os.Getenv("T_TOKEN")
+	adminIDsStr := strings.Split(os.Getenv("ADMIN_IDS"), ",")
+
+	for _, idstr := range adminIDsStr {
+		id, err := strconv.ParseInt(idstr, 10, 64)
+		if err != nil {
+			panic(err)
+		}
+		adminIDs = append(adminIDs, id)
 	}
+
 	err = binlog.NewContext()
 	if err != nil {
-		log.Fatalf("Failed binlog initialization, %s", err)
+		log.Fatal("Failed binlog initialization", rz.Err(err))
 	}
 
-	tw, err = tamework.New(setting.App.Telegram.Token)
+	tw, err = tamework.New(accessToken)
 	if err != nil {
-		log.Fatalf("Failed telegram bot initialization, %s", err)
+		log.Fatal("Failed telegram bot initialization", rz.Err(err))
 	}
+
+	go func() {
+		cli := whuClient.New(os.Getenv("WHU_URL"))
+		fn := makeHandleYACB(tw, offerRepo, userRepo)
+		cli.Run(fn)
+	}()
+	ttoken, tid, err := talert.ParseDSN()
+	if err != nil {
+		log.Error("parse talert dsn",
+			rz.String("dsn", os.Getenv("TALERT_DSN")),
+		)
+	}
+	talert.Init(ttoken, tid)
+
+	tw.NotFound = func(ctx *tamework.Context) {
+		ctx.Keyboard.Remove()
+		ctx.Send("Вы ввели несуществующую команду!")
+		ctx.Keyboard.AddCallbackButton("На главную", "main")
+		ctx.Send("Попробуйте начать сначала")
+	}
+
+	tw.Bot().RemoveWebhook()
+
+	tw.Use(func(ctx *tamework.Context) {
+		if ctx.Text != "" {
+			log.Debug("middleware",
+				rz.String("text", ctx.Text))
+		}
+		user, err := userRepo.Get(int(ctx.UserID))
+		if err != nil {
+			if err == storm.ErrNotFound {
+				ctx.Keyboard.Remove()
+				ctx.Send("Добро пожаловать!")
+				ctx.Keyboard.AddCallbackButton("Санкт-Петербург", "setcity:1")
+				ctx.Keyboard.AddCallbackButton("Москва", "setcity:2")
+				ctx.Send("Выберите город")
+				ctx.Exit()
+				userRepo.Create(int(ctx.UserID), "", 0)
+				return
+			} else {
+				log.Error("get user from db", rz.Err(err))
+			}
+		}
+
+		if user.Username != getUsername(ctx) {
+			user.Username = getUsername(ctx)
+			err := userRepo.Update(user)
+			if err != nil {
+				log.Error("update username", rz.Err(err))
+			}
+		}
+
+		ctx.Data["user"] = user
+
+	})
+
+	tw.Prefix("toggletag:", func(ctx *tamework.Context) {
+		log.Debug("toggle tag", rz.String("text", ctx.Text))
+		var arr = strings.Split(ctx.Text, ":")
+		if len(arr) != 2 {
+			return
+		}
+		id, err := strconv.ParseInt(arr[0], 10, 64)
+		if err != nil {
+			log.Error("parse id", rz.Err(err))
+			return
+		}
+		offer, err := offerRepo.GetByID(int(id))
+		if err != nil {
+			log.Error("err get offer from db", rz.Err(err))
+			return
+		}
+
+		err = offerRepo.ToggleTag(int(id), arr[1])
+		if err != nil {
+			log.Error("err get offer from db", rz.Err(err))
+			return
+		}
+
+		//✖️✅
+		var btns = []string{
+			buttons.TagSearchNester,
+			buttons.TagSearchCompanion,
+			buttons.TagReplace,
+			buttons.TagHookUp,
+			buttons.TagSearchNest,
+		}
+		for _, btn := range btns {
+			var found bool
+			for _, t := range offer.Tags {
+				if t == btn {
+					found = true
+				}
+			}
+			if found {
+				ctx.Keyboard.AddCallbackButton("✅ "+btn, "toggletag:"+fmt.Sprint(offer.ID)+":"+btn)
+				ctx.Keyboard.AddCallbackButton("", "")
+			} else {
+				ctx.Keyboard.AddCallbackButton("✖️ "+btn, "toggletag:"+fmt.Sprint(offer.ID)+":"+btn)
+				ctx.Keyboard.AddCallbackButton("", "")
+			}
+		}
+		ctx.EditReplyMarkup(ctx.Keyboard)
+	})
+
+	tw.Prefix("showmenu:", func(ctx *tamework.Context) {
+		//id, _ := strconv.ParseInt(ctx.Text, 10, 64)
+		log.Debug("show menu", rz.String("text", ctx.Text))
+		ctx.Keyboard.AddCallbackButton("Изображения", "showimages:"+ctx.Text)
+		ctx.Keyboard.AddCallbackButton("Опубликовать", "publish:"+ctx.Text)
+		ctx.EditReplyMarkup(ctx.Keyboard)
+	})
+
+	tw.CallbackQuery("main", func(ctx *tamework.Context) {
+		ctx.Answer("Домой")
+		setDefaultKeyboard(ctx)
+		ctx.Send("Чтобы создать объявление, выберите соответствующие пункты меню")
+	})
+
+	tw.Prefix("setcity:", func(ctx *tamework.Context) {
+		id, err := strconv.ParseInt(ctx.Text, 10, 64)
+		if err != nil {
+			log.Error("setcity: parse city id", rz.Err(err), rz.String("text", ctx.Text))
+			ctx.Answer("Ошибка установки города")
+			return
+		}
+		if id != 1 && id != 2 {
+			log.Error("setcity: bad city id", rz.String("text", ctx.Text), rz.Int64("parsed id", id))
+			ctx.Answer("Что-то пошло не так")
+			return
+		}
+
+		err = userRepo.Create(int(ctx.UserID), getUsername(ctx), int(id))
+		if err != nil {
+			log.Error("setcity: insert user", rz.Err(err), rz.Int64("tuid", ctx.UserID), rz.Int64("city", id))
+			ctx.Answer("Ошибка установки города")
+			return
+		}
+		ctx.Answer("Установлен город: " + ctx.Text)
+
+		setDefaultKeyboard(ctx)
+		ctx.Send("Чтобы создать объявление, выберите соответствующие пункты меню")
+	})
+
+	tw.Prefix("showhistory:", func(ctx *tamework.Context) {
+		id, _ := strconv.ParseInt(ctx.Text, 10, 64)
+		list, err := helpRepo.List(int(id))
+		if err != nil {
+			log.Error("get list from db", rz.Err(err))
+		}
+		text := ""
+		for _, msg := range list {
+			if msg.IsIncoming {
+				text += "пользователь>" + msg.Text + "\n\n"
+			} else {
+				text += "адм>" + msg.Text + "\n\n"
+			}
+		}
+		ctx.Keyboard.AddCallbackButton("Ответить", "sup"+strconv.Itoa(int(id)))
+		ctx.Send(text)
+	})
 
 	tw.Text("/menu", Greeting)
 	//alias
@@ -55,6 +341,54 @@ func main() {
 	//tw.Text("/start", Greeting)
 	tw.Text(buttons.SubscriptionsButton, subscriptions.Subscriptions)
 	tw.Text(buttons.SubscriptionsOwnerButton, subscriptions.SubscriptionsOwner)
+
+	tw.Text(buttons.SearchNester, delivery.MakeCreate(offersPkg.SearchNester, adminIDs, offerRepo))
+	tw.Text(buttons.SearchCompanion, delivery.MakeCreate(offersPkg.SearchCompanion, adminIDs, offerRepo))
+	tw.Text(buttons.SearchHookUp, delivery.MakeCreate(offersPkg.SearchHookUp, adminIDs, offerRepo))
+	tw.Text(buttons.SearchNest, delivery.MakeCreate(offersPkg.SearchNest, adminIDs, offerRepo))
+
+	tw.Text(buttons.MyOffers, func(ctx *tamework.Context) {
+		offrs, err := offerRepo.GetByUserID(int(ctx.UserID))
+		if err != nil {
+			log.Error("get offers by user", rz.Err(err))
+		}
+		userFace := ctx.Data["user"]
+		user := userFace.(*user.User)
+		for _, offer := range offrs {
+			text, _ := offersPkg.FormatMarkdown(offer, user.Username)
+			ctx.Keyboard.AddCallbackButton("Изображения", "showimages:"+strconv.Itoa(int(offer.ID)))
+			log.Debug("send offer", rz.String("text", text))
+			_, err = ctx.Markdown(text)
+			if err != nil {
+				log.Error("send msg", rz.Err(err))
+			}
+		}
+	})
+
+	tw.Prefix("showimages:", func(ctx *tamework.Context) {
+		log.Debug("show images", rz.String("text", ctx.Text))
+		id, err := strconv.ParseInt(ctx.Text, 10, 64)
+		if err != nil {
+			log.Error("send msg", rz.Err(err))
+			return
+		}
+		offer, err := offerRepo.GetByID(int(id))
+		if err != nil {
+			log.Error("send msg", rz.Err(err))
+			return
+		}
+		var images []interface{}
+		for _, img := range offer.Images {
+			med := tgbotapi.NewInputMediaPhoto(img)
+			images = append(images, med)
+		}
+		msg := tgbotapi.NewMediaGroup(ctx.ChatID, images)
+		_, err = ctx.BotAPI().Send(msg)
+		if err != nil {
+			log.Error("send msg", rz.Err(err))
+		}
+		ctx.Answer("")
+	})
 
 	var subscribeButtons = []string{
 		buttons.AboutRent,
@@ -77,8 +411,8 @@ func main() {
 		tw.CallbackQuery("un"+but, subscriptions.MakeTogleUnSubscribe(but))
 	}
 
-	tw.Text("/support", Support)
-	tw.CallbackQuery("/support", Support)
+	tw.Text("/support", MakeSupport(helpRepo))
+	tw.CallbackQuery("/support", MakeSupport(helpRepo))
 	tw.RegistreMethod("/support", buttons.HelpButton)
 
 	tw.Text(buttons.AddProposalSearch, Add)
@@ -87,261 +421,329 @@ func main() {
 	tw.Text("/terms", Terms)
 
 	// chat
-	tw.Prefix("sup", Sup)
+	tw.Prefix("sup", MakeSup(helpRepo))
 
-	tw.Prefix("setcat_", SetCat)
+	//tw.Prefix("setcat_", SetCat)
 
-	tw.Prefix("upvote_", UpVote)
-	tw.Prefix("downvote_", DownVote)
-	tw.Prefix("publish_", Publish)
+	// tw.Prefix("upvote_", UpVote)
+	// tw.Prefix("downvote_", DownVote)
+	tw.Prefix("publish:", MakePublish(offerRepo, userRepo))
 
-	go tw.Run()
+	tw.Run()
 
-	m := macaron.New()
-	m.Use(macaron.Renderer())
+	// m := macaron.New()
+	// m.Post("/cb", func(ctx *macaron.Context) {
+	// 	ctx.Req.ParseForm()
+	// 	log.Debug("post form", rz.String("form", fmt.Sprint(ctx.Req.PostForm)))
 
-	m.Post(fmt.Sprintf("/%s/event", setting.App.Secret), binding.Bind(Message{}), eventHandler)
+	// 	amount := ctx.QueryFloat64("amount")
+	// 	label := ctx.Query("label")
+	// 	// todo get offer by label
+	// 	// send to moderation
+	// 	log.Debug("received values", rz.Float64("amount", amount), rz.String("label", label))
+	// })
+	// m.Use(macaron.Renderer())
 
-	m.Run(2018)
+	//m.Post(fmt.Sprintf("/%s/event", setting.App.Secret), binding.Bind(Message{}), eventHandler)
+
+	//m.Run(2018)
 
 }
 
-func Publish(c *tamework.Context) {
-	c.Answer("опубликовано")
-	msgID := com.StrTo(c.Text).MustInt64()
+func MakePublish(offersRepo offersPkg.Repository, userRepo user.Repo) tamework.HandleFunc {
+	return func(ctx *tamework.Context) {
+		log.Debug("publish offer", rz.String("text", ctx.Text))
 
-	var res smmmodels.Messages
+		offerID := com.StrTo(ctx.Text).MustInt()
 
-	err := dry.FileUnmarshallJSON(fmt.Sprintf("https://smmpolice.ru/api/v1/messages/%d", msgID), &res)
-	if err != nil {
-		c.Send(err.Error())
-		return
-	}
-
-	uploadRemoteMessage("@ughome", msgID, res.UserLink(), getVoteKeyboard(msgID, false))
-}
-
-func UpVote(c *tamework.Context) {
-	vote(c, 1)
-}
-
-func DownVote(c *tamework.Context) {
-	vote(c, -1)
-}
-
-func vote(c *tamework.Context, vote int) {
-	user, err := models.UserGetOrCreate(c.UserID)
-	if err != nil {
-		color.Red("%s", err)
-		return
-	}
-	objID := com.StrTo(c.Text).MustInt64()
-	err = models.VotesVote(user.ID, objID, vote)
-	if err != nil {
-		color.Red("%s", err)
-		return
-	}
-	c.Answer("Голос учтён")
-	cnt, err := models.VotesCount(objID, 1)
-	if err != nil {
-		color.Red("%s", err)
-		return
-	}
-	cntDown, err := models.VotesCount(objID, -1)
-	if err != nil {
-		color.Red("%s", err)
-		return
-	}
-	isAdmin := c.ChatID == 102710272
-	c.EditReplyMurkup(getVoteKeyboard(objID, isAdmin, cnt, cntDown))
-}
-
-func SetCat(c *tamework.Context) {
-	arr := strings.Split(c.Text, "_")
-	if len(arr) != 2 {
-		return
-	}
-	msgID := com.StrTo(arr[0]).MustInt64()
-	catID := com.StrTo(arr[1]).MustInt()
-	if cap, ok := catWait[msgID]; ok {
-		err := broadcast(msgID, catID, cap)
+		offer, err := offersRepo.GetByID(offerID)
 		if err != nil {
-			log.Println(err)
+			log.Error("get offer from db", rz.Err(err))
 		}
-		delete(catWait, msgID)
+		if offer.Published {
+			ctx.Answer("уже опубликовано")
+		} else {
+			ctx.Answer("опубликовано")
+		}
+
+		user, err := userRepo.Get(offer.UserID)
+		if err != nil {
+			log.Error("get offer user from db", rz.Err(err))
+			return
+		}
+
+		text := ""
+		for _, tag := range offer.Tags {
+			text += tag + "\n"
+		}
+		text += "\n" + offer.Text
+		text += "\n\nКонтакты: " + offer.Contacts
+
+		offer.Published = true
+		err = offersRepo.Update(offer)
+		if err != nil {
+			log.Error("set published to db", rz.Err(err))
+			return
+		}
+
+		reqMsg := tgbotapi.NewMessageToChannel(channelByCity(user.City), text)
+		reqMsg.DisableNotification = true
+		msg, err := ctx.BotAPI().Send(reqMsg)
+		if err != nil {
+			log.Error("err send message", rz.Err(err))
+			return
+		}
+
+		var images []interface{}
+		for _, img := range offer.Images {
+			med := tgbotapi.NewInputMediaPhoto(img)
+			images = append(images, med)
+		}
+		mdg := tgbotapi.NewMediaGroup(ctx.ChatID, images)
+		mdg.ChannelUsername = "@zhutest"
+		mdg.ReplyToMessageID = msg.MessageID
+		mdg.DisableNotification = true
+		_, err = ctx.BotAPI().Send(mdg)
+		if err != nil {
+			log.Error("send msg", rz.Err(err))
+		}
 	}
-	c.Answer("Сообщение опубликовано")
-	c.EditText(c.Update().CallbackQuery.Message.Text)
 }
 
-func Sup(c *tamework.Context) {
-	userID := com.StrTo(c.Text).MustInt64()
-	c.Keyboard.AddReplyButton(buttons.CancelButton)
-	c.Send("Введите ответное сообщение:")
-	u, done := c.Wait(buttons.CancelButton, time.Second*180)
-	if done {
-		c.Keyboard.Reset().AddCallbackButton("Ответить", "/support")
-		c.SendTo(userID, u.Text())
-		setDefaultKeyboard(c)
-		c.Send("Сообщение отправлено.")
+// func UpVote(c *tamework.Context) {
+// 	vote(c, 1)
+// }
+
+// func DownVote(c *tamework.Context) {
+// 	vote(c, -1)
+// }
+
+// func vote(c *tamework.Context, vote int) {
+// 	user, err := models.UserGetOrCreate(c.UserID)
+// 	if err != nil {
+// 		color.Red("%s", err)
+// 		return
+// 	}
+// 	objID := com.StrTo(c.Text).MustInt64()
+// 	err = models.VotesVote(user.ID, objID, vote)
+// 	if err != nil {
+// 		color.Red("%s", err)
+// 		return
+// 	}
+// 	c.Answer("Голос учтён")
+// 	cnt, err := models.VotesCount(objID, 1)
+// 	if err != nil {
+// 		color.Red("%s", err)
+// 		return
+// 	}
+// 	cntDown, err := models.VotesCount(objID, -1)
+// 	if err != nil {
+// 		color.Red("%s", err)
+// 		return
+// 	}
+// 	isAdmin := c.ChatID == 102710272
+// 	c.EditReplyMarkup(getVoteKeyboard(objID, isAdmin, cnt, cntDown))
+// }
+
+// func SetCat(c *tamework.Context) {
+// 	arr := strings.Split(c.Text, "_")
+// 	if len(arr) != 2 {
+// 		return
+// 	}
+// 	msgID := com.StrTo(arr[0]).MustInt64()
+// 	catID := com.StrTo(arr[1]).MustInt()
+// 	if cap, ok := catWait[msgID]; ok {
+// 		err := broadcast(msgID, catID, cap)
+// 		if err != nil {
+// 			log.Debug("err broadcast", rz.Err(err))
+// 		}
+// 		delete(catWait, msgID)
+// 	}
+// 	c.Answer("Сообщение опубликовано")
+// 	c.EditText(c.Update().CallbackQuery.Message.Text)
+// }
+
+func MakeSup(helpRepo helpPkg.Repo) tamework.HandleFunc {
+	return func(c *tamework.Context) {
+		userID := com.StrTo(c.Text).MustInt64()
+		c.Keyboard.AddReplyButton(buttons.CancelButton)
+		c.Send("Введите ответное сообщение:")
+		u, done := c.Wait(buttons.CancelButton, time.Second*180)
+		if done {
+			c.Keyboard.Reset().AddCallbackButton("Ответить", "/support")
+			log.Debug("send help response to user", rz.Int64("user", userID))
+			_, err := c.SendTo(userID, "Ответ администратора: \n\n"+u.Text())
+			if err != nil {
+				log.Error("err send response to message", rz.Err(err))
+			}
+			helpRepo.Create(int(userID), u.Text(), false)
+			setDefaultKeyboard(c)
+			c.Send("Сообщение отправлено.")
+		}
 	}
 }
 
 var catWait = map[int64]Message{}
 
-func eventHandler(c *macaron.Context, event Message) {
-	if event.IsTest {
-		c.JSON(200, "ok")
-		return
-	}
+// func eventHandler(c *macaron.Context, event Message) {
+// 	if event.IsTest {
+// 		c.JSON(200, "ok")
+// 		return
+// 	}
 
-	if event.Category == 0 {
-		kb := tamework.NewKeyboard(nil).AddCallbackButton("#сдаю_гнездышко", fmt.Sprintf("setcat_%d_1", event.ID)).
-			AddCallbackButton("").
-			AddCallbackButton("#сосед_гнездышко", fmt.Sprintf("setcat_%d_3", event.ID)).
-			AddCallbackButton("").
-			// AddCallbackButton("О поиске комнат", fmt.Sprintf("setcat_%d_4", event.ID)).
-			// AddCallbackButton("").
-			AddCallbackButton("#сниму_гнездышко", fmt.Sprintf("setcat_%d_5", event.ID))
-		if event.HasPhoto {
-			_, err := uploadRemoteMessage(setting.App.Telegram.Admin, event.ID, event.Contact, kb)
+// 	if event.Category == 0 {
+// 		kb := tamework.NewKeyboard(nil).AddCallbackButton("#сдаю_гнездышко", fmt.Sprintf("setcat_%d_1", event.ID)).
+// 			AddCallbackButton("").
+// 			AddCallbackButton("#сосед_гнездышко", fmt.Sprintf("setcat_%d_3", event.ID)).
+// 			AddCallbackButton("").
+// 			// AddCallbackButton("О поиске комнат", fmt.Sprintf("setcat_%d_4", event.ID)).
+// 			// AddCallbackButton("").
+// 			AddCallbackButton("#сниму_гнездышко", fmt.Sprintf("setcat_%d_5", event.ID))
+// 		if event.HasPhoto {
+// 			for _, admID := range adminIDs {
+// 				_, err := uploadRemoteMessage(admID, event.ID, event.Contact, kb)
+// 				if err != nil {
+// 					log.Debug("err broadcast", rz.Err(err))
+// 				}
+// 			}
+// 		} else {
+// 			for _, admID := range adminIDs {
+// 				msg := tgbotapi.NewMessage(admID,
+// 					fmt.Sprintf("%s\n\n%s", event.Body, event.Contact))
+// 				msg.ReplyMarkup = kb.Markup()
+// 				_, err := tw.Bot().Send(msg)
+// 				if err != nil {
+// 					color.Red("%s", err)
+// 				}
+// 			}
+// 		}
+// 		catWait[event.ID] = event
+// 		return
+// 	}
+// 	err := broadcast(event.ID, event.Category, event)
+// 	if err != nil {
+// 		log.Debug("err broadcast", rz.Err(err))
+// 	}
 
-		} else {
-			msg := tgbotapi.NewMessage(setting.App.Telegram.Admin,
-				fmt.Sprintf("%s\n\n%s", event.Body, event.Contact))
-			msg.ReplyMarkup = kb.Markup()
-			_, err := tw.Bot().Send(msg)
-			if err != nil {
-				color.Red("%s", err)
-			}
-		}
-		catWait[event.ID] = event
-		return
-	}
-	err := broadcast(event.ID, event.Category, event)
-	if err != nil {
-		log.Println(err)
-	}
+// 	c.JSON(200, "ok")
+// }
 
-	c.JSON(200, "ok")
-}
+// func getVoteKeyboard(msgID int64, isAdmin bool, votes ...int) *tamework.Keyboard {
+// 	kb := tamework.NewKeyboard(nil)
+// 	up := "👍"
+// 	if len(votes) > 0 && votes[0] != 0 {
+// 		up += fmt.Sprintf(" %d", votes[0])
+// 	}
+// 	down := "👎"
+// 	if len(votes) > 1 && votes[1] != 0 {
+// 		down += fmt.Sprintf(" %d", votes[1])
+// 	}
+// 	kb.AddCallbackButton(up, "upvote_"+fmt.Sprint(msgID)).
+// 		AddCallbackButton(down, "downvote_"+fmt.Sprint(msgID))
+// 	if isAdmin {
+// 		kb.AddCallbackButton("в канал "+fmt.Sprint(msgID), "publish_"+fmt.Sprint(msgID))
+// 	}
+// 	return kb
+// }
 
-func getVoteKeyboard(msgID int64, isAdmin bool, votes ...int) *tamework.Keyboard {
-	kb := tamework.NewKeyboard(nil)
-	up := "👍"
-	if len(votes) > 0 && votes[0] != 0 {
-		up += fmt.Sprintf(" %d", votes[0])
-	}
-	down := "👎"
-	if len(votes) > 1 && votes[1] != 0 {
-		down += fmt.Sprintf(" %d", votes[1])
-	}
-	kb.AddCallbackButton(up, "upvote_"+fmt.Sprint(msgID)).
-		AddCallbackButton(down, "downvote_"+fmt.Sprint(msgID))
-	if isAdmin {
-		kb.AddCallbackButton("в канал "+fmt.Sprint(msgID), "publish_"+fmt.Sprint(msgID))
-	}
-	return kb
-}
+// func broadcast(msgID int64, catID int, event Message) (err error) {
+// 	var (
+// 		subs      []int64
+// 		channelID = ""
+// 	)
 
-func broadcast(msgID int64, catID int, event Message) (err error) {
-	var (
-		subs      []int64
-		channelID = ""
-	)
+// 	switch catID {
+// 	//AboutRent
+// 	case 1:
+// 		channelID = buttons.AboutRent
+// 	case 2:
+// 		channelID = buttons.AboutRentRoom
+// 	case 3:
+// 		channelID = buttons.AboutNeightborg
+// 	case 4:
+// 		channelID = buttons.AboutFinderRoom
+// 	case 5:
+// 		channelID = buttons.AboutFinder
+// 	default:
+// 		return
+// 	}
 
-	switch catID {
-	//AboutRent
-	case 1:
-		channelID = buttons.AboutRent
-	case 2:
-		channelID = buttons.AboutRentRoom
-	case 3:
-		channelID = buttons.AboutNeightborg
-	case 4:
-		channelID = buttons.AboutFinderRoom
-	case 5:
-		channelID = buttons.AboutFinder
-	default:
-		return
-	}
+// 	subs, err = models.GetSubscribers(channelID)
+// 	if err != nil {
+// 		return
+// 	}
 
-	subs, err = models.GetSubscribers(channelID)
-	if err != nil {
-		return
-	}
+// 	color.Green("%v", subs)
+// 	var (
+// 		photoID string
+// 	)
 
-	color.Green("%v", subs)
-	var (
-		photoID string
-	)
+// 	for _, subID := range subs {
+// 		kb := getVoteKeyboard(msgID, false) //
 
-	for _, subID := range subs {
-		kb := getVoteKeyboard(msgID, false) //
+// 		if photoID == "" && event.HasPhoto {
+// 			photoID, err = uploadRemoteMessage(subID, msgID, event.Contact, kb)
+// 			if err != nil {
+// 				color.Red("%s", err)
+// 				continue
+// 			}
+// 			continue
+// 		}
+// 		if event.HasPhoto {
+// 			msg := tgbotapi.NewPhotoShare(subID, photoID)
+// 			msg.Caption = event.Contact
+// 			msg.ReplyMarkup = kb.Markup()
+// 			_, err = tw.Bot().Send(msg)
+// 			if err != nil {
+// 				color.Red("%s", err)
+// 				continue
+// 			}
+// 		} else {
+// 			msg := tgbotapi.NewMessage(subID,
+// 				fmt.Sprintf("%s\n\n%s", event.Body, event.Contact))
+// 			msg.ReplyMarkup = kb.Markup()
+// 			_, err = tw.Bot().Send(msg)
+// 			if err != nil {
+// 				color.Red("%s", err)
+// 				continue
+// 			}
+// 		}
 
-		if photoID == "" && event.HasPhoto {
-			photoID, err = uploadRemoteMessage(subID, msgID, event.Contact, kb)
-			if err != nil {
-				color.Red("%s", err)
-				continue
-			}
-			continue
-		}
-		if event.HasPhoto {
-			msg := tgbotapi.NewPhotoShare(subID, photoID)
-			msg.Caption = event.Contact
-			msg.ReplyMarkup = kb.Markup()
-			_, err = tw.Bot().Send(msg)
-			if err != nil {
-				color.Red("%s", err)
-				continue
-			}
-		} else {
-			msg := tgbotapi.NewMessage(subID,
-				fmt.Sprintf("%s\n\n%s", event.Body, event.Contact))
-			msg.ReplyMarkup = kb.Markup()
-			_, err = tw.Bot().Send(msg)
-			if err != nil {
-				color.Red("%s", err)
-				continue
-			}
-		}
+// 	}
+// 	return
+// }
 
-	}
-	return
-}
-
-func uploadRemoteMessage(userID interface{}, msgID int64, caption string, kbs ...*tamework.Keyboard) (photoID string, err error) {
-	var imageURI = "https://smmpolice.ru/external/image/" + fmt.Sprint(msgID)
-	bts, err := dry.FileGetBytes(imageURI)
-	if err != nil {
-		color.Red("http %s", err)
-		return
-	}
-	f := tgbotapi.FileBytes{
-		Bytes: bts,
-		Name:  "file.jpg",
-	}
-	cnf := tgbotapi.NewPhotoUpload(userID, f)
-	cnf.Caption = caption
-	cnf.DisableNotification = true
-	if len(kbs) > 0 {
-		cnf.ReplyMarkup = kbs[0].Markup()
-	}
-	resp, err := tw.Bot().Send(cnf)
-	if err != nil {
-		color.Red("send %s", err)
-		return
-	}
-	var maxSize int
-	for _, v := range *resp.Photo {
-		if maxSize < v.Height {
-			maxSize = v.Height
-			photoID = v.FileID
-		}
-	}
-	return
-}
+// func uploadRemoteMessage(userID int64, msgID int64, caption string, kbs ...*tamework.Keyboard) (photoID string, err error) {
+// 	var imageURI = "https://smmpolice.ru/external/image/" + fmt.Sprint(msgID)
+// 	bts, err := dry.FileGetBytes(imageURI)
+// 	if err != nil {
+// 		color.Red("http %s", err)
+// 		return
+// 	}
+// 	f := tgbotapi.FileBytes{
+// 		Bytes: bts,
+// 		Name:  "file.jpg",
+// 	}
+// 	cnf := tgbotapi.NewPhotoUpload(userID, f)
+// 	cnf.Caption = caption
+// 	cnf.DisableNotification = true
+// 	if len(kbs) > 0 {
+// 		cnf.ReplyMarkup = kbs[0].Markup()
+// 	}
+// 	resp, err := tw.Bot().Send(cnf)
+// 	if err != nil {
+// 		color.Red("send %s", err)
+// 		return
+// 	}
+// 	var maxSize int
+// 	for _, v := range *resp.Photo {
+// 		if maxSize < v.Height {
+// 			maxSize = v.Height
+// 			photoID = v.FileID
+// 		}
+// 	}
+// 	return
+// }
 
 type Message struct {
 	Category int `json:"category"`
@@ -437,7 +839,7 @@ func Add(c *tamework.Context) {
 					maxSizeID = v.FileID
 					maxSizeValue = v.FileSize
 				}
-				log.Println(v.FileID, v.FileSize, v.Height, v.Width)
+				log.Debug("values", rz.String("vals", fmt.Sprintf("%v %v %v %v", v.FileID, v.FileSize, v.Height, v.Width)))
 			}
 		}
 
@@ -454,37 +856,55 @@ func Terms(c *tamework.Context) {
 	c.Send("Мы не передаём третьим лицам ваши персональные данные, не парьтесь)")
 }
 
-func Support(c *tamework.Context) {
-	supportText := `По вопросам оплаты и паблика ВК пишите @gnezdovchenko
+func MakeSupport(helpRepo helpPkg.Repo) tamework.HandleFunc {
+	return func(c *tamework.Context) {
+		supportText := `По вопросам оплаты и паблика ВК пишите @Andrewsaltanov
 
-По вопросам работы бота пишите @zhuha
+		По вопросам работы бота пишите @zhuha
+		
+		Если у вас общий вопрос или предложение, пишите тут, мы ответим в течении 8 часов.`
 
-Если у вас общий вопрос или предложение, пишите тут, мы ответим в течении 8 часов.`
+		c.Keyboard = tamework.NewKeyboard(buttons.CancelButton)
+		c.Send(supportText)
 
-	c.Keyboard = tamework.NewKeyboard(buttons.CancelButton)
-	c.Send(supportText)
+		u, done := c.Wait(buttons.CancelButton, time.Second*180)
+		if !done {
+			Greeting(c)
+			return
+		}
+		c.Keyboard = tamework.NewKeyboard(buttons.Menu)
+		c.Keyboard.SetRowLen(2)
+		c.Send("Мы получили ваш вопрос и уже начали думать)")
 
-	u, done := c.Wait(buttons.CancelButton, time.Second*180)
-	if !done {
-		Greeting(c)
-		return
+		helpRepo.Create(int(c.UserID), u.Text(), true)
+
+		for _, admID := range adminIDs {
+			log.Debug("send help question to admin")
+			c.Keyboard = tamework.NewKeyboard(nil)
+			username := c.Update().Username()
+			if strings.HasPrefix(c.Update().Username(), "_") {
+				username = "без юзернейма"
+			} else {
+				username = "@" + username
+			}
+			c.Keyboard.AddCallbackButton("Показать переписку", "showhistory:"+fmt.Sprint(c.ChatID))
+			c.Keyboard.AddCallbackButton("Ответить", "sup"+strconv.Itoa(int(c.ChatID)))
+			msgText := fmt.Sprintf("Новый вопрос (%s):\n\n%s", username, u.Text())
+			_, err := c.SendTo(admID, msgText)
+			if err != nil {
+				log.Error("send msg to t", rz.Err(err), rz.String("text", msgText))
+			}
+		}
 	}
-	c.Keyboard = tamework.NewKeyboard(buttons.Menu)
-	c.Keyboard.SetRowLen(2)
-	c.Send("Мы получили ваш вопрос и уже начали думать)")
-
-	c.Keyboard = tamework.NewKeyboard(nil)
-	c.Keyboard.AddCallbackButton("Ответить", "sup"+fmt.Sprint(c.ChatID))
-	c.SendTo(setting.App.Telegram.Admin, u.Text())
 }
 
 func Greeting(c *tamework.Context) {
 	setDefaultKeyboard(c)
-	err := c.Markdown(fmt.Sprintf(`Что бы получать новые объявления, выбирайте *%s* и настраивайте нужные параметры.
+	_, err := c.Markdown(fmt.Sprintf(`Что бы получать новые объявления, выбирайте *%s* и настраивайте нужные параметры.
 
 Что бы добавить объявление, жмите *%s*.`, buttons.SubscriptionsButton, buttons.SubscriptionsOwnerButton))
 	if err != nil {
-		log.Println(err)
+		log.Error("greeting", rz.Err(err))
 	}
 }
 
@@ -492,4 +912,15 @@ func setDefaultKeyboard(c *tamework.Context) {
 	c.NewKeyboard(buttons.Menu)
 	c.Keyboard.SetRowLen(2)
 	c.Keyboard.SetType(tamework.KeyboardReply)
+}
+
+func channelByCity(cityID int) string {
+	switch cityID {
+	case 1:
+		return "@ughome"
+	case 2:
+		return "@ugnezdishko"
+	default:
+		return "@zhutest"
+	}
 }
