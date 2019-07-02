@@ -31,7 +31,7 @@ import (
 	whuClient "github.com/zhuharev/whu/domain/client"
 )
 
-const version = "0.0.3"
+const version = "0.0.5"
 
 var (
 	tw       *tamework.Tamework
@@ -349,6 +349,26 @@ func main() {
 	tw.Text(buttons.SearchHookUp, delivery.MakeCreate(offersPkg.SearchHookUp, adminIDs, offerRepo))
 	tw.Text(buttons.SearchNest, delivery.MakeCreate(offersPkg.SearchNest, adminIDs, offerRepo))
 
+	tw.Prefix("Показать объявление ", func(ctx *tamework.Context) {
+		id, _ := strconv.Atoi(ctx.Text)
+		o, err := offerRepo.GetByID(id)
+		if err != nil {
+			log.Error("get offers by user", rz.Err(err))
+		}
+		user, err := userRepo.Get(o.UserID)
+		if err != nil {
+			log.Error("get user by id", rz.Err(err))
+		}
+		text, _ := offersPkg.FormatMarkdown(*o, user.Username)
+		ctx.Keyboard.AddCallbackButton("Изображения", "showimages:"+strconv.Itoa(int(o.ID)))
+		ctx.Keyboard.AddCallbackButton("Файлы", "showfiles:"+strconv.Itoa(int(o.ID)))
+		log.Debug("send offer", rz.String("text", text))
+		_, err = ctx.Markdown(text)
+		if err != nil {
+			log.Error("send msg", rz.Err(err))
+		}
+	})
+
 	tw.Text(buttons.MyOffers, func(ctx *tamework.Context) {
 		offrs, err := offerRepo.GetByUserID(int(ctx.UserID))
 		if err != nil {
@@ -388,6 +408,26 @@ func main() {
 		_, err = ctx.BotAPI().Send(msg)
 		if err != nil {
 			log.Error("send msg", rz.Err(err))
+		}
+		ctx.Answer("")
+	})
+
+	tw.Prefix("showfiles:", func(ctx *tamework.Context) {
+		log.Debug("show images", rz.String("text", ctx.Text))
+		id, err := strconv.ParseInt(ctx.Text, 10, 64)
+		if err != nil {
+			log.Error("send msg", rz.Err(err))
+			return
+		}
+		offer, err := offerRepo.GetByID(int(id))
+		if err != nil {
+			log.Error("send msg", rz.Err(err))
+			return
+		}
+		for _, img := range offer.Images {
+			msg := tgbotapi.NewPhotoShare(ctx.ChatID, img)
+			msg.Caption = img
+			ctx.BotAPI().Send(msg)
 		}
 		ctx.Answer("")
 	})

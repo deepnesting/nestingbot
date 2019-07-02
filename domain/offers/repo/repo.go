@@ -55,6 +55,11 @@ func (r *repo) GetByUserID(userID int) (offrs []offers.Offer, err error) {
 	return
 }
 
+func (r *repo) List() (offrs []offers.Offer, err error) {
+	err = r.db.All(&offrs, storm.Reverse(), storm.Limit(5))
+	return
+}
+
 func (r *repo) ToggleTag(offerID int, tag string) error {
 	o := offers.Offer{}
 	err := r.db.One("ID", offerID, &o)

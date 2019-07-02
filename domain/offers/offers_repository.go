@@ -9,6 +9,8 @@ type Repository interface {
 	GetByUserID(userID int) ([]Offer, error)
 	ToggleTag(offerID int, tag string) error
 	Update(o *Offer) error
+
+	List() ([]Offer, error)
 }
 
 // func NewRepository(db *storm.DB) Repository {
