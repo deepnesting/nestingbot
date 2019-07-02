@@ -31,7 +31,7 @@ import (
 	whuClient "github.com/zhuharev/whu/domain/client"
 )
 
-const version = "0.0.2"
+const version = "0.0.3"
 
 var (
 	tw       *tamework.Tamework
@@ -177,7 +177,7 @@ func main() {
 		fn := makeHandleYACB(tw, offerRepo, userRepo)
 		cli.Run(fn)
 	}()
-	ttoken, tid, err := talert.ParseDSN()
+	ttoken, tid, err := talert.ParseDSN(os.Getenv("TALERT_DSN"))
 	if err != nil {
 		log.Error("parse talert dsn",
 			rz.String("dsn", os.Getenv("TALERT_DSN")),

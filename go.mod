@@ -29,7 +29,7 @@ require (
 	github.com/zhuharev/boltutils v0.0.0-20171127202453-3acb389c5185
 	github.com/zhuharev/errors v0.0.2
 	github.com/zhuharev/intarr v0.0.0-20171026204208-e0d9580c97e2
-	github.com/zhuharev/talert v0.0.5 // indirect
+	github.com/zhuharev/talert v0.0.5
 	github.com/zhuharev/tamework v0.0.3
 	github.com/zhuharev/whu v0.0.6
 	golang.org/x/crypto v0.0.0-20190618222545-ea8f1a30c443 // indirect
