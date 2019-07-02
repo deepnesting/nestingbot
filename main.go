@@ -31,7 +31,7 @@ import (
 	whuClient "github.com/zhuharev/whu/domain/client"
 )
 
-const version = "0.0.5"
+const version = "0.0.6"
 
 var (
 	tw       *tamework.Tamework
@@ -425,7 +425,7 @@ func main() {
 			return
 		}
 		for _, img := range offer.Images {
-			msg := tgbotapi.NewPhotoShare(ctx.ChatID, img)
+			msg := tgbotapi.NewDocumentShare(ctx.ChatID, img)
 			msg.Caption = img
 			ctx.BotAPI().Send(msg)
 		}
