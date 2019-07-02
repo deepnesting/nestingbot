@@ -184,6 +184,8 @@ func main() {
 		)
 	}
 	talert.Init(ttoken, tid)
+	talert.Alert("nestingbot started",
+		talert.String("version", version))
 
 	tw.NotFound = func(ctx *tamework.Context) {
 		ctx.Keyboard.Remove()
