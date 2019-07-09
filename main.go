@@ -31,7 +31,7 @@ import (
 	whuClient "github.com/zhuharev/whu/domain/client"
 )
 
-const version = "0.0.6"
+const version = "0.0.7"
 
 var (
 	tw       *tamework.Tamework

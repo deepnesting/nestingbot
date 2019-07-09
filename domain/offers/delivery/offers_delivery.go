@@ -239,11 +239,11 @@ func MakeCreate(typ string, admins []int64, offerRepo offers.Repository) tamewor
 		ctx.Keyboard.AddURLButton("Оплатить", getPaymentURL(uint64(offer.ID)))
 		ctx.Markdown("Объявление будет опубликовано после оплаты")
 
-		renderedOffer, _ = offers.FormatMarkdown(*offer, user.Username)
-		for _, admin := range admins {
-			ctx.Keyboard.AddCallbackButton("Меню", fmt.Sprintf("showmenu:%d", offer.ID))
-			ctx.MarkdownTo(admin, renderedOffer)
-		}
+		// renderedOffer, _ = offers.FormatMarkdown(*offer, user.Username)
+		// for _, admin := range admins {
+		// 	ctx.Keyboard.AddCallbackButton("Меню", fmt.Sprintf("showmenu:%d", offer.ID))
+		// 	ctx.MarkdownTo(admin, renderedOffer)
+		// }
 	}
 }
 
