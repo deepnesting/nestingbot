@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"strconv"
 	"strings"
@@ -25,13 +26,12 @@ import (
 	"github.com/deepnesting/nestingbot/routers/subscriptions"
 	"github.com/fatih/color"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api"
+	"github.com/labstack/echo"
 	"github.com/zhuharev/talert"
 	"github.com/zhuharev/tamework"
-
-	whuClient "github.com/zhuharev/whu/domain/client"
 )
 
-const version = "0.0.7"
+const version = "0.0.9"
 
 var (
 	tw       *tamework.Tamework
@@ -172,11 +172,12 @@ func main() {
 		log.Fatal("Failed telegram bot initialization", rz.Err(err))
 	}
 
-	go func() {
-		cli := whuClient.New(os.Getenv("WHU_URL"))
-		fn := makeHandleYACB(tw, offerRepo, userRepo)
-		cli.Run(fn)
-	}()
+	yacbHandler := makeHandleYACB(tw, offerRepo, userRepo)
+	// go func() {
+	// 	cli := whuClient.New(os.Getenv("WHU_URL"))
+
+	// 	cli.Run(yacbHandler)
+	// }()
 	ttoken, tid, err := talert.ParseDSN(os.Getenv("TALERT_DSN"))
 	if err != nil {
 		log.Error("parse talert dsn",
@@ -404,6 +405,9 @@ func main() {
 			med := tgbotapi.NewInputMediaPhoto(img)
 			images = append(images, med)
 		}
+		if len(images) > 10 {
+			images = images[:10]
+		}
 		msg := tgbotapi.NewMediaGroup(ctx.ChatID, images)
 		_, err = ctx.BotAPI().Send(msg)
 		if err != nil {
@@ -471,25 +475,29 @@ func main() {
 	// tw.Prefix("downvote_", DownVote)
 	tw.Prefix("publish:", MakePublish(offerRepo, userRepo))
 
-	tw.Run()
+	go tw.Run()
 
-	// m := macaron.New()
-	// m.Post("/cb", func(ctx *macaron.Context) {
-	// 	ctx.Req.ParseForm()
-	// 	log.Debug("post form", rz.String("form", fmt.Sprint(ctx.Req.PostForm)))
+	e := echo.New()
+	e.GET("/ping", func(ctx echo.Context) error {
+		return ctx.JSON(200, "pong")
+	})
+	e.POST("/external/webhooks/tbot", func(ctx echo.Context) error {
+		var bodyBytes []byte
+		if ctx.Request().Body != nil {
+			bodyBytes, _ = ioutil.ReadAll(ctx.Request().Body)
+		}
+		err := yacbHandler(bodyBytes)
+		if err != nil {
+			return err
+		}
+		return ctx.JSON(200, "ok")
+	})
 
-	// 	amount := ctx.QueryFloat64("amount")
-	// 	label := ctx.Query("label")
-	// 	// todo get offer by label
-	// 	// send to moderation
-	// 	log.Debug("received values", rz.Float64("amount", amount), rz.String("label", label))
-	// })
-	// m.Use(macaron.Renderer())
-
-	//m.Post(fmt.Sprintf("/%s/event", setting.App.Secret), binding.Bind(Message{}), eventHandler)
-
-	//m.Run(2018)
-
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8008"
+	}
+	log.Fatal("start server", rz.Err(e.Start("0.0.0.0:"+port)))
 }
 
 func MakePublish(offersRepo offersPkg.Repository, userRepo user.Repo) tamework.HandleFunc {

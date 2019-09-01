@@ -18,6 +18,7 @@ require (
 	github.com/jinzhu/gorm v1.9.8
 	github.com/kisielk/errcheck v1.2.0 // indirect
 	github.com/konsorten/go-windows-terminal-sequences v1.0.2 // indirect
+	github.com/labstack/echo v3.3.10+incompatible
 	github.com/leodido/go-urn v1.1.0 // indirect
 	github.com/mailru/easyjson v0.0.0-20190403194419-1ea4449da983
 	github.com/pkg/errors v0.8.1

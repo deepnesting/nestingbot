@@ -101,7 +101,7 @@ func MakeCreate(typ string, admins []int64, offerRepo offers.Repository) tamewor
 		}
 		ctx.Keyboard.AddReplyButton(buttons.CancelButton)
 		ctx.Keyboard.AddReplyButton(buttons.NextButton)
-		ctx.Send("Шаг 2/4. Пришлите фотографии. Дождитесь пока фотографии загрузятся и нажмите кнопку <Далее>.")
+		ctx.Send("Шаг 2/4. Пришлите фотографии (до 10-ти штук). Дождитесь пока фотографии загрузятся и нажмите кнопку <Далее>.")
 		for {
 			update, done := ctx.Wait(buttons.CancelButton, time.Minute*5)
 			if !done {
@@ -118,6 +118,9 @@ func MakeCreate(typ string, admins []int64, offerRepo offers.Repository) tamewor
 			}
 			if id, ok := getFileID(update); ok {
 				images = append(images, id)
+				if len(images) == 10 {
+					break
+				}
 				ctx.Send("Фото загружено, загрузите ещё или нажмите Далее")
 			} else {
 				ctx.Send("Нужно послать фотку")
