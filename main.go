@@ -38,7 +38,7 @@ var (
 )
 
 // func sendTestMessage() {
-// 	bot, _ := tamework.New("882530435:AAF9rkG95tg4f10YNSfOdDFogVYFzgLskwU")
+// 	bot, _ := tamework.New("")
 // 	err := bot.Send(132101139, "Добрый день! При создании объявления не сохранились ваши контакты, пришлите их пожалуйста администратору @Andrewsaltanov . Спасибо!")
 // 	if err != nil {
 // 		panic(err)
