@@ -23,7 +23,6 @@ import (
 	"github.com/deepnesting/nestingbot/domain/user"
 	"github.com/deepnesting/nestingbot/pkg/binlog"
 	"github.com/deepnesting/nestingbot/pkg/buttons"
-	"github.com/deepnesting/nestingbot/routers/subscriptions"
 	"github.com/fatih/color"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api"
 	"github.com/labstack/echo"
@@ -189,7 +188,6 @@ func main() {
 		talert.String("version", version))
 
 	tw.NotFound = func(ctx *tamework.Context) {
-		ctx.Keyboard.Remove()
 		ctx.Send("Вы ввели несуществующую команду!")
 		ctx.Keyboard.AddCallbackButton("На главную", "main")
 		ctx.Send("Попробуйте начать сначала")
@@ -200,7 +198,7 @@ func main() {
 	tw.Use(func(ctx *tamework.Context) {
 		if ctx.Text != "" {
 			log.Debug("middleware",
-				rz.String("text", ctx.Text))
+				rz.String("text", ctx.Text), rz.Int("update_type", int(ctx.Update().Type())))
 		}
 		user, err := userRepo.Get(int(ctx.UserID))
 		if err != nil {
@@ -342,8 +340,8 @@ func main() {
 	tw.RegistreMethod("/menu", buttons.Back)
 	tw.RegistreMethod("/menu", buttons.CancelButton)
 	//tw.Text("/start", Greeting)
-	tw.Text(buttons.SubscriptionsButton, subscriptions.Subscriptions)
-	tw.Text(buttons.SubscriptionsOwnerButton, subscriptions.SubscriptionsOwner)
+	//tw.Text(buttons.SubscriptionsButton, subscriptions.Subscriptions)
+	//tw.Text(buttons.SubscriptionsOwnerButton, subscriptions.SubscriptionsOwner)
 
 	tw.Text(buttons.SearchNester, delivery.MakeCreate(offersPkg.SearchNester, adminIDs, offerRepo))
 	tw.Text(buttons.SearchCompanion, delivery.MakeCreate(offersPkg.SearchCompanion, adminIDs, offerRepo))
@@ -436,43 +434,38 @@ func main() {
 		ctx.Answer("")
 	})
 
-	var subscribeButtons = []string{
-		buttons.AboutRent,
-		buttons.AboutNeightborg,
-		buttons.AboutRentRoom,
-	}
+	// var subscribeButtons = []string{
+	// 	buttons.AboutRent,
+	// 	buttons.AboutNeightborg,
+	// 	buttons.AboutRentRoom,
+	// }
 
-	for _, but := range subscribeButtons {
-		tw.Text(but, subscriptions.MakeTogleSubscribe(but))
-		tw.CallbackQuery("un"+but, subscriptions.MakeTogleUnSubscribe(but))
-	}
+	//for _, but := range subscribeButtons {
+	//tw.Text(but, subscriptions.MakeTogleSubscribe(but))
+	//tw.CallbackQuery("un"+but, subscriptions.MakeTogleUnSubscribe(but))
+	//}
 
-	var subscribeFinderButtons = []string{
-		buttons.AboutFinderRoom,
-		buttons.AboutFinder,
-	}
+	// var subscribeFinderButtons = []string{
+	// 	buttons.AboutFinderRoom,
+	// 	buttons.AboutFinder,
+	// }
 
-	for _, but := range subscribeFinderButtons {
-		tw.Text(but, subscriptions.MakeTogleSubscribe(but))
-		tw.CallbackQuery("un"+but, subscriptions.MakeTogleUnSubscribe(but))
-	}
+	//for _, but := range subscribeFinderButtons {
+	//tw.Text(but, subscriptions.MakeTogleSubscribe(but))
+	//tw.CallbackQuery("un"+but, subscriptions.MakeTogleUnSubscribe(but))
+	//}
 
 	tw.Text("/support", MakeSupport(helpRepo))
 	tw.CallbackQuery("/support", MakeSupport(helpRepo))
 	tw.RegistreMethod("/support", buttons.HelpButton)
 
 	tw.Text(buttons.AddProposalSearch, Add)
-	//tw.RegistreMethod(buttons.AddProposal, buttons.AddProposalSearch)
 
 	tw.Text("/terms", Terms)
 
 	// chat
 	tw.Prefix("sup", MakeSup(helpRepo))
 
-	//tw.Prefix("setcat_", SetCat)
-
-	// tw.Prefix("upvote_", UpVote)
-	// tw.Prefix("downvote_", DownVote)
 	tw.Prefix("publish:", MakePublish(offerRepo, userRepo))
 
 	go tw.Run()
@@ -522,96 +515,14 @@ func MakePublish(offersRepo offersPkg.Repository, userRepo user.Repo) tamework.H
 			return
 		}
 
-		text := ""
-		for _, tag := range offer.Tags {
-			text += tag + "\n"
-		}
-		text += "\n" + offer.Text
-		text += "\n\nКонтакты: " + offer.Contacts
-
-		offer.Published = true
-		err = offersRepo.Update(offer)
+		err = delivery.SendFullOfferToChannel(ctx.BotAPI(), channelByCity(user.City), offer, user)
 		if err != nil {
-			log.Error("set published to db", rz.Err(err))
+			ctx.Send(fmt.Sprintf("Ошибка публикации: %s", err))
 			return
 		}
-
-		reqMsg := tgbotapi.NewMessageToChannel(channelByCity(user.City), text)
-		reqMsg.DisableNotification = true
-		msg, err := ctx.BotAPI().Send(reqMsg)
-		if err != nil {
-			log.Error("err send message", rz.Err(err))
-			return
-		}
-
-		var images []interface{}
-		for _, img := range offer.Images {
-			med := tgbotapi.NewInputMediaPhoto(img)
-			images = append(images, med)
-		}
-		mdg := tgbotapi.NewMediaGroup(ctx.ChatID, images)
-		mdg.ChannelUsername = "@zhutest"
-		mdg.ReplyToMessageID = msg.MessageID
-		mdg.DisableNotification = true
-		_, err = ctx.BotAPI().Send(mdg)
-		if err != nil {
-			log.Error("send msg", rz.Err(err))
-		}
+		ctx.Send("Объявление опубликовано!")
 	}
 }
-
-// func UpVote(c *tamework.Context) {
-// 	vote(c, 1)
-// }
-
-// func DownVote(c *tamework.Context) {
-// 	vote(c, -1)
-// }
-
-// func vote(c *tamework.Context, vote int) {
-// 	user, err := models.UserGetOrCreate(c.UserID)
-// 	if err != nil {
-// 		color.Red("%s", err)
-// 		return
-// 	}
-// 	objID := com.StrTo(c.Text).MustInt64()
-// 	err = models.VotesVote(user.ID, objID, vote)
-// 	if err != nil {
-// 		color.Red("%s", err)
-// 		return
-// 	}
-// 	c.Answer("Голос учтён")
-// 	cnt, err := models.VotesCount(objID, 1)
-// 	if err != nil {
-// 		color.Red("%s", err)
-// 		return
-// 	}
-// 	cntDown, err := models.VotesCount(objID, -1)
-// 	if err != nil {
-// 		color.Red("%s", err)
-// 		return
-// 	}
-// 	isAdmin := c.ChatID == 102710272
-// 	c.EditReplyMarkup(getVoteKeyboard(objID, isAdmin, cnt, cntDown))
-// }
-
-// func SetCat(c *tamework.Context) {
-// 	arr := strings.Split(c.Text, "_")
-// 	if len(arr) != 2 {
-// 		return
-// 	}
-// 	msgID := com.StrTo(arr[0]).MustInt64()
-// 	catID := com.StrTo(arr[1]).MustInt()
-// 	if cap, ok := catWait[msgID]; ok {
-// 		err := broadcast(msgID, catID, cap)
-// 		if err != nil {
-// 			log.Debug("err broadcast", rz.Err(err))
-// 		}
-// 		delete(catWait, msgID)
-// 	}
-// 	c.Answer("Сообщение опубликовано")
-// 	c.EditText(c.Update().CallbackQuery.Message.Text)
-// }
 
 func MakeSup(helpRepo helpPkg.Repo) tamework.HandleFunc {
 	return func(c *tamework.Context) {
@@ -634,166 +545,6 @@ func MakeSup(helpRepo helpPkg.Repo) tamework.HandleFunc {
 }
 
 var catWait = map[int64]Message{}
-
-// func eventHandler(c *macaron.Context, event Message) {
-// 	if event.IsTest {
-// 		c.JSON(200, "ok")
-// 		return
-// 	}
-
-// 	if event.Category == 0 {
-// 		kb := tamework.NewKeyboard(nil).AddCallbackButton("#сдаю_гнездышко", fmt.Sprintf("setcat_%d_1", event.ID)).
-// 			AddCallbackButton("").
-// 			AddCallbackButton("#сосед_гнездышко", fmt.Sprintf("setcat_%d_3", event.ID)).
-// 			AddCallbackButton("").
-// 			// AddCallbackButton("О поиске комнат", fmt.Sprintf("setcat_%d_4", event.ID)).
-// 			// AddCallbackButton("").
-// 			AddCallbackButton("#сниму_гнездышко", fmt.Sprintf("setcat_%d_5", event.ID))
-// 		if event.HasPhoto {
-// 			for _, admID := range adminIDs {
-// 				_, err := uploadRemoteMessage(admID, event.ID, event.Contact, kb)
-// 				if err != nil {
-// 					log.Debug("err broadcast", rz.Err(err))
-// 				}
-// 			}
-// 		} else {
-// 			for _, admID := range adminIDs {
-// 				msg := tgbotapi.NewMessage(admID,
-// 					fmt.Sprintf("%s\n\n%s", event.Body, event.Contact))
-// 				msg.ReplyMarkup = kb.Markup()
-// 				_, err := tw.Bot().Send(msg)
-// 				if err != nil {
-// 					color.Red("%s", err)
-// 				}
-// 			}
-// 		}
-// 		catWait[event.ID] = event
-// 		return
-// 	}
-// 	err := broadcast(event.ID, event.Category, event)
-// 	if err != nil {
-// 		log.Debug("err broadcast", rz.Err(err))
-// 	}
-
-// 	c.JSON(200, "ok")
-// }
-
-// func getVoteKeyboard(msgID int64, isAdmin bool, votes ...int) *tamework.Keyboard {
-// 	kb := tamework.NewKeyboard(nil)
-// 	up := "👍"
-// 	if len(votes) > 0 && votes[0] != 0 {
-// 		up += fmt.Sprintf(" %d", votes[0])
-// 	}
-// 	down := "👎"
-// 	if len(votes) > 1 && votes[1] != 0 {
-// 		down += fmt.Sprintf(" %d", votes[1])
-// 	}
-// 	kb.AddCallbackButton(up, "upvote_"+fmt.Sprint(msgID)).
-// 		AddCallbackButton(down, "downvote_"+fmt.Sprint(msgID))
-// 	if isAdmin {
-// 		kb.AddCallbackButton("в канал "+fmt.Sprint(msgID), "publish_"+fmt.Sprint(msgID))
-// 	}
-// 	return kb
-// }
-
-// func broadcast(msgID int64, catID int, event Message) (err error) {
-// 	var (
-// 		subs      []int64
-// 		channelID = ""
-// 	)
-
-// 	switch catID {
-// 	//AboutRent
-// 	case 1:
-// 		channelID = buttons.AboutRent
-// 	case 2:
-// 		channelID = buttons.AboutRentRoom
-// 	case 3:
-// 		channelID = buttons.AboutNeightborg
-// 	case 4:
-// 		channelID = buttons.AboutFinderRoom
-// 	case 5:
-// 		channelID = buttons.AboutFinder
-// 	default:
-// 		return
-// 	}
-
-// 	subs, err = models.GetSubscribers(channelID)
-// 	if err != nil {
-// 		return
-// 	}
-
-// 	color.Green("%v", subs)
-// 	var (
-// 		photoID string
-// 	)
-
-// 	for _, subID := range subs {
-// 		kb := getVoteKeyboard(msgID, false) //
-
-// 		if photoID == "" && event.HasPhoto {
-// 			photoID, err = uploadRemoteMessage(subID, msgID, event.Contact, kb)
-// 			if err != nil {
-// 				color.Red("%s", err)
-// 				continue
-// 			}
-// 			continue
-// 		}
-// 		if event.HasPhoto {
-// 			msg := tgbotapi.NewPhotoShare(subID, photoID)
-// 			msg.Caption = event.Contact
-// 			msg.ReplyMarkup = kb.Markup()
-// 			_, err = tw.Bot().Send(msg)
-// 			if err != nil {
-// 				color.Red("%s", err)
-// 				continue
-// 			}
-// 		} else {
-// 			msg := tgbotapi.NewMessage(subID,
-// 				fmt.Sprintf("%s\n\n%s", event.Body, event.Contact))
-// 			msg.ReplyMarkup = kb.Markup()
-// 			_, err = tw.Bot().Send(msg)
-// 			if err != nil {
-// 				color.Red("%s", err)
-// 				continue
-// 			}
-// 		}
-
-// 	}
-// 	return
-// }
-
-// func uploadRemoteMessage(userID int64, msgID int64, caption string, kbs ...*tamework.Keyboard) (photoID string, err error) {
-// 	var imageURI = "https://smmpolice.ru/external/image/" + fmt.Sprint(msgID)
-// 	bts, err := dry.FileGetBytes(imageURI)
-// 	if err != nil {
-// 		color.Red("http %s", err)
-// 		return
-// 	}
-// 	f := tgbotapi.FileBytes{
-// 		Bytes: bts,
-// 		Name:  "file.jpg",
-// 	}
-// 	cnf := tgbotapi.NewPhotoUpload(userID, f)
-// 	cnf.Caption = caption
-// 	cnf.DisableNotification = true
-// 	if len(kbs) > 0 {
-// 		cnf.ReplyMarkup = kbs[0].Markup()
-// 	}
-// 	resp, err := tw.Bot().Send(cnf)
-// 	if err != nil {
-// 		color.Red("send %s", err)
-// 		return
-// 	}
-// 	var maxSize int
-// 	for _, v := range *resp.Photo {
-// 		if maxSize < v.Height {
-// 			maxSize = v.Height
-// 			photoID = v.FileID
-// 		}
-// 	}
-// 	return
-// }
 
 type Message struct {
 	Category int `json:"category"`

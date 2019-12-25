@@ -1,4 +1,4 @@
-make all
+#make all
 go build -o nestingbot
 upx nestingbot
 rsync -avzrP --exclude 'data/*' ./ simplecloud:/home/god/sites/nestingbot/

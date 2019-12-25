@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -83,7 +84,18 @@ func MakeCreate(typ string, admins []int64, offerRepo offers.Repository) tamewor
 			contacts string
 		)
 		ctx.Keyboard.AddReplyButton(buttons.CancelButton)
-		ctx.Send("Шаг 1/4. Пришлите текст объявления.")
+
+		id, err := offerRepo.Create(int(ctx.UserID), typ, text, images, contacts)
+		if err != nil {
+			log.Error("create offer", rz.Err(err))
+		}
+
+		offer, err := offerRepo.GetByID(id)
+		if err != nil {
+			log.Error("adsa", rz.Err(err))
+		}
+
+		ctx.Send(fmt.Sprintf("Шаг 1/4. Пришлите текст объявления (номер объявления: %d).", id))
 		for {
 			update, done := ctx.Wait(buttons.CancelButton, time.Minute*5)
 			if !done {
@@ -91,9 +103,12 @@ func MakeCreate(typ string, admins []int64, offerRepo offers.Repository) tamewor
 				ctx.Send("Создание объявления прекращено, попробуйте ещё раз")
 				return
 			}
-			text = update.Text()
-			if len(text) < 10 {
+			offer.Text = update.Text()
+			if len(offer.Text) < 10 {
 				ctx.Send("Текст объявления слишком короткий")
+				continue
+			} else if len(offer.Text) > 823 {
+				ctx.Send("Текст объявления слишком длинный! Длина текста не должна превышать 800 символов, у вас: " + strconv.Itoa(len(offer.Text)))
 				continue
 			} else {
 				break
@@ -104,6 +119,9 @@ func MakeCreate(typ string, admins []int64, offerRepo offers.Repository) tamewor
 		ctx.Send("Шаг 2/4. Пришлите фотографии (до 10-ти штук). Дождитесь пока фотографии загрузятся и нажмите кнопку <Далее>.")
 		for {
 			update, done := ctx.Wait(buttons.CancelButton, time.Minute*5)
+			log.Debug("waited update",
+				rz.String("text", update.Text()), rz.Int("update_type", int(update.Type())))
+
 			if !done {
 				setDefaultKeyboard(ctx)
 				ctx.Send("Создание объявления прекращено, попробуйте ещё раз")
@@ -122,10 +140,15 @@ func MakeCreate(typ string, admins []int64, offerRepo offers.Repository) tamewor
 					break
 				}
 				ctx.Send("Фото загружено, загрузите ещё или нажмите Далее")
+			} else if ctx.Text == buttons.CancelButton {
+				return
+
 			} else {
 				ctx.Send("Нужно послать фотку")
 			}
 		}
+
+		offer.Images = images
 
 		ctx.Keyboard.AddReplyButton(buttons.CancelButton)
 		ctx.Send("Шаг 3/4. Пришлите/напишите свои контактные данные.")
@@ -139,25 +162,27 @@ func MakeCreate(typ string, admins []int64, offerRepo offers.Repository) tamewor
 			if update.Text() == "" {
 				ctx.Send("Контакты не могут быть пустыми")
 				continue
+			} else if len(update.Text()) > 200 {
+				ctx.Send("Длина контактов не должна превышать 200 символов, у вас: " + strconv.Itoa(len(update.Text())))
+				continue
 			}
 			contacts = update.Text()
 			break
 		}
 
-		id, err := offerRepo.Create(int(ctx.UserID), typ, text, images, contacts)
+		//update here
+
+		offer.Contacts = contacts
+
+		err = offerRepo.Update(offer)
 		if err != nil {
-			log.Error("adsa", rz.Err(err))
+			log.Error("update offer", rz.Err(err))
 		}
 
 		ctx.Keyboard.AddReplyButton(buttons.CancelButton)
 		ctx.Keyboard.AddReplyButton(buttons.NextButton)
 
 		ctx.Send("Последний шаг) Добавьте тэги и нажмите 'Далее'")
-
-		offer, err := offerRepo.GetByID(id)
-		if err != nil {
-			log.Error("adsa", rz.Err(err))
-		}
 
 		userFace := ctx.Data["user"]
 		user, ok := userFace.(*user.User)
@@ -232,15 +257,29 @@ func MakeCreate(typ string, admins []int64, offerRepo offers.Repository) tamewor
 			} else {
 				log.Debug("break", rz.String("text", update.Text()))
 
-				setDefaultKeyboard(ctx)
-				ctx.Send("Объявление отправлено на модерацию")
-
 				break
 			}
 		}
+
+		setDefaultKeyboard(ctx)
+
+		ctx.Send("Ваше объявление будет выглядеть вот так (проверьте, что текст верный и все изображения загружены):")
+
+		err = SendFullOfferToUser(ctx.BotAPI(), int(ctx.UserID), offer, user)
+		if err != nil {
+			ctx.Send("Ошибка предпросмотра! Мы работаем над проблемой.")
+
+			for _, admin := range admins {
+				ctx.SendTo(int64(admin), fmt.Sprintf("Произошла ошибка предпросмотра объявления %d: %s", offer.ID, err))
+			}
+
+			return
+		}
+
 		ctx.Keyboard.Reset()
-		ctx.Keyboard.AddURLButton("Оплатить", getPaymentURL(uint64(offer.ID)))
-		ctx.Markdown("Объявление будет опубликовано после оплаты")
+		paymentURL := getPaymentURL(uint64(offer.ID))
+		ctx.Keyboard.AddURLButton("Оплатить", paymentURL)
+		ctx.Markdown("Объявление будет опубликовано после оплаты. Ссылка для оплаты: " + paymentURL)
 
 		// renderedOffer, _ = offers.FormatMarkdown(*offer, user.Username)
 		// for _, admin := range admins {
@@ -253,7 +292,7 @@ func MakeCreate(typ string, admins []int64, offerRepo offers.Repository) tamewor
 func getPaymentURL(id uint64) string {
 	uri := "https://money.yandex.ru/quickpay/shop-widget?writer=seller&targets-hint=&button-text=11&hint=&quickpay=shop&payment-type-choice=on"
 	uri += "&account=" + os.Getenv("YANDEX_MONEY_ACCOUNT")
-	uri += "&targets=Объявление в Телеграмм-канале"
+	uri += "&targets=" + url.QueryEscape("Объявление в Телеграмм-канале")
 	uri += "&default-sum=39"
 	uri += fmt.Sprintf("&label=u:%d", id)
 	uri += "&successURL=https://t.me/ugnestbot"
@@ -264,4 +303,47 @@ func setDefaultKeyboard(c *tamework.Context) {
 	c.NewKeyboard(buttons.Menu)
 	c.Keyboard.SetRowLen(2)
 	c.Keyboard.SetType(tamework.KeyboardReply)
+}
+
+func CreateBotOfferMessage(offer *offers.Offer, u *user.User) tgbotapi.MediaGroupConfig {
+	text := ""
+	for _, tag := range offer.Tags {
+		text += tag + "\n"
+	}
+	text += "\n" + offer.Text
+	text += "\n\nКонтакты: " + offer.Contacts
+
+	var images []interface{}
+	for i, img := range offer.Images {
+		med := tgbotapi.NewInputMediaPhoto(img)
+		if i == 0 {
+			med.Caption = text
+		}
+		images = append(images, med)
+	}
+	mdg := tgbotapi.NewMediaGroup(0, images)
+	mdg.DisableNotification = true
+	return mdg
+}
+
+func SendFullOfferToChannel(bot *tgbotapi.BotAPI, channelUsername string, offer *offers.Offer, u *user.User) error {
+	mdg := CreateBotOfferMessage(offer, u)
+	mdg.ChannelUsername = channelUsername
+	_, err := bot.Send(mdg)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func SendFullOfferToUser(bot *tgbotapi.BotAPI, chatID int, offer *offers.Offer, u *user.User) error {
+	mdg := CreateBotOfferMessage(offer, u)
+	mdg.ChatID = int64(chatID)
+	_, err := bot.Send(mdg)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
